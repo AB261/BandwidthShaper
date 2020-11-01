@@ -101,10 +101,10 @@ private:
   Time m_timeCheckPoint;           //!< Time check-point
   EventId m_id;                    //!< EventId of the scheduled queue
   uint32_t m_overhead;             //!< actual size of a packet on the wire
-  uint32_t m_networkoOffset;
+  uint32_t m_networkOffset;
   bool m_isAtm;                    //!< true if is ATM network
   bool m_isPtm;                    //!< true if is PTM network
-  uint32_t backlog; 
+  uint32_t m_backlog; 
   DataRate m_shapedBandwidth;      //!< Bandwidth to be shaped to               
 };
 
