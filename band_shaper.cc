@@ -28,6 +28,7 @@
 #include "ns3/drop-tail-queue.h"
 #include "ns3/net-device-queue-interface.h"
 #include "tbf-queue-disc.h"
+#include "band_shaper.h"
 
 namespace ns3 {
 
@@ -48,11 +49,11 @@ TypeId BandwidthShaper::GetTypeId (void)
                    MakeQueueSizeAccessor (&QueueDisc::SetMaxSize,
                                           &QueueDisc::GetMaxSize),
                    MakeQueueSizeChecker ())
-    .AddAttribute ("Burst",
-                   "Size of the first bucket in bytes",
-                   UintegerValue (125000),
-                   MakeUintegerAccessor (&BandwidthShaper::SetBurst),
-                   MakeUintegerChecker<uint32_t> ())
+    // .AddAttribute ("Burst",
+    //                "Size of the first bucket in bytes",
+    //                UintegerValue (125000),
+    //                MakeUintegerAccessor (&BandwidthShaper::SetBurst),
+    //                MakeUintegerChecker<uint32_t> ())
     .AddAttribute ("Mtu",
                    "Size of the second bucket in bytes. If null, it is initialized"
                    " to the MTU of the receiving NetDevice (if any)",
@@ -64,20 +65,20 @@ TypeId BandwidthShaper::GetTypeId (void)
                    DataRateValue (DataRate ("125KB/s")),
                    MakeDataRateAccessor (&BandwidthShaper::SetRate),
                    MakeDataRateChecker ())
-    .AddAttribute ("PeakRate",
-                   "Rate at which tokens enter the second bucket in bps or Bps."
-                   "If null, there is no second bucket",
-                   DataRateValue (DataRate ("0KB/s")),
-                   MakeDataRateAccessor (&BandwidthShaper::SetPeakRate),
-                   MakeDataRateChecker ())
-    .AddTraceSource ("TokensInFirstBucket",
-                     "Number of First Bucket Tokens in bytes",
-                     MakeTraceSourceAccessor (&BandwidthShaper::m_btokens),
-                     "ns3::TracedValueCallback::Uint32")
-    .AddTraceSource ("TokensInSecondBucket",
-                     "Number of Second Bucket Tokens in bytes",
-                     MakeTraceSourceAccessor (&BandwidthShaper::m_ptokens),
-                     "ns3::TracedValueCallback::Uint32")
+    // .AddAttribute ("PeakRate",
+    //                "Rate at which tokens enter the second bucket in bps or Bps."
+    //                "If null, there is no second bucket",
+    //                DataRateValue (DataRate ("0KB/s")),
+    //                MakeDataRateAccessor (&BandwidthShaper::SetPeakRate),
+    //                MakeDataRateChecker ())
+    // .AddTraceSource ("TokensInFirstBucket",
+    //                  "Number of First Bucket Tokens in bytes",
+    //                  MakeTraceSourceAccessor (&BandwidthShaper::m_btokens),
+    //                  "ns3::TracedValueCallback::Uint32")
+    // .AddTraceSource ("TokensInSecondBucket",
+    //                  "Number of Second Bucket Tokens in bytes",
+    //                  MakeTraceSourceAccessor (&BandwidthShaper::m_ptokens),
+    //                  "ns3::TracedValueCallback::Uint32")
   ;
 
   return tid;
@@ -173,6 +174,7 @@ BandwidthShaper::DoEnqueue (Ptr<QueueDiscItem> item)
   return retval;
 }
 
+
 Ptr<QueueDiscItem>
 BandwidthShaper::DoDequeue (void)
 {
@@ -184,67 +186,25 @@ BandwidthShaper::DoDequeue (void)
       uint32_t pktSize = itemPeek->GetSize ();
       NS_LOG_LOGIC ("Next packet size " << pktSize);
 
-      int64_t btoks = 0;
-      int64_t ptoks = 0;
       Time now = Simulator::Now ();
 
       double delta = (now  - m_timeCheckPoint).GetSeconds ();
       NS_LOG_LOGIC ("Time Difference delta " << delta);
+      // The Timer setup.
+      /* If delta > 0 that means the time checkpoint has passed and so 
+      the packet can be dequeued. If that is not the case then set up the required
+      delay to wake up the simulator at the time and send the packet.  */
+      if(delta>0){
+        Ptr<QueueDiscItem> item = GetQueueDiscClass (0)->GetQueueDisc ()->Dequeue ();
+        Time nextDelayTime = now+pktSize*(m_shapedBandwidth.GetBitRate()/8);
+        m_id = Simulator::Schedule (nextDelayTime, &QueueDisc::Run, this);
+        return item;
+      }else{
+        Time requiredDelayTime = m_timeCheckPoint-now;
+        m_id = Simulator::Schedule (requiredDelayTime, &QueueDisc::Run, this);
+        NS_LOG_LOGIC("Waking Event Scheduled in " << requiredDelayTime);
+      }
 
-      if (m_peakRate > DataRate ("0bps"))
-        {
-          ptoks =  m_ptokens + round (delta * (m_peakRate.GetBitRate () / 8));
-          if (ptoks > m_mtu)
-            {
-              ptoks = m_mtu;
-            }
-          NS_LOG_LOGIC ("Number of ptokens we can consume " << ptoks);
-          NS_LOG_LOGIC ("Required to dequeue next packet " << pktSize);
-          ptoks -= pktSize;
-        }
-
-      btoks = m_btokens + round (delta * (m_rate.GetBitRate () / 8));
-
-      if (btoks > m_burst)
-        {
-          btoks = m_burst;
-        }
-
-      NS_LOG_LOGIC ("Number of btokens we can consume " << btoks);
-      NS_LOG_LOGIC ("Required to dequeue next packet " << pktSize);
-      btoks -= pktSize;
-
-      if ((btoks|ptoks) >= 0) // else packet blocked
-        {
-          Ptr<QueueDiscItem> item = GetQueueDiscClass (0)->GetQueueDisc ()->Dequeue ();
-          if (!item)
-            {
-              NS_LOG_DEBUG ("That's odd! Expecting the peeked packet, we got no packet.");
-              return item;
-            }
-
-          m_timeCheckPoint = now;
-          m_btokens = btoks;
-          m_ptokens = ptoks;
-
-          NS_LOG_LOGIC (m_btokens << " btokens and " << m_ptokens << " ptokens after packet dequeue");
-          NS_LOG_LOGIC ("Current queue size: " << GetNPackets () << " packets, " << GetNBytes () << " bytes");
-
-          return item;
-        }
-
-      // the watchdog timer setup.
-      /* A packet gets blocked if the above if condition is not satisfied, i.e.
-      both the ptoks and btoks are less than zero. In that case we have to 
-      schedule the waking of queue when enough tokens are available. */
-      if (m_id.IsExpired () == true)
-        {
-          Time requiredDelayTime = std::max (m_rate.CalculateBytesTxTime (-btoks),
-                                             m_peakRate.CalculateBytesTxTime (-ptoks));
-
-          m_id = Simulator::Schedule (requiredDelayTime, &QueueDisc::Run, this);
-          NS_LOG_LOGIC("Waking Event Scheduled in " << requiredDelayTime);
-        }
     }
   return 0;
 }
@@ -330,9 +290,6 @@ void
 BandwidthShaper::InitializeParams (void)
 {
   NS_LOG_FUNCTION (this);
-  // Token Buckets are full at the beginning.
-  m_btokens = m_burst;
-  m_ptokens = m_mtu;
   // Initialising other variables to 0.
   m_timeCheckPoint = Seconds (0);
   m_id = EventId ();
